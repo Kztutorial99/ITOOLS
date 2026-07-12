@@ -1,0 +1,78 @@
+name: ✅ Validate Il2CppDumper
+
+on:
+  push:
+    branches: [ main ]
+    paths:
+      - 'il2cppDumper/**'
+  pull_request:
+    branches: [ main ]
+  workflow_dispatch:
+
+jobs:
+  validate:
+    name: 🔍 Validasi Struktur & File
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: ⬇️ Checkout
+        uses: actions/checkout@v4
+
+      - name: 📁 Cek folder il2cppDumper
+        run: |
+          echo "=== ISI FOLDER il2cppDumper ==="
+          ls -la il2cppDumper/
+          echo ""
+
+          # Cek file wajib
+          REQUIRED=("SETUP.md")
+          MISSING=0
+          for f in "${REQUIRED[@]}"; do
+            if [ -f "il2cppDumper/$f" ]; then
+              echo "✅ $f — ada"
+            else
+              echo "❌ $f — TIDAK ADA"
+              MISSING=$((MISSING+1))
+            fi
+          done
+
+          if [ $MISSING -gt 0 ]; then
+            echo "⚠️  Ada $MISSING file wajib yang hilang"
+            exit 1
+          fi
+          echo ""
+          echo "✅ Semua file wajib ada"
+
+      - name: 📊 Cek Release Assets
+        run: |
+          echo "=== CEK RELEASE ASSET APK ==="
+          LATEST=$(curl -s \
+            -H "Authorization: Bearer ${{ secrets.GITHUB_TOKEN }}" \
+            "https://api.github.com/repos/${{ github.repository }}/releases/latest")
+
+          NAME=$(echo "$LATEST" | grep -o '"name":"[^"]*"' | head -1 | cut -d'"' -f4)
+          ASSETS=$(echo "$LATEST" | grep -o '"browser_download_url":"[^"]*"' | grep -i apk | wc -l)
+
+          if [ -z "$NAME" ]; then
+            echo "ℹ️  Belum ada release — jalankan workflow 'Release Il2CppDumper' dulu"
+          else
+            echo "Release terbaru : $NAME"
+            echo "APK assets      : $ASSETS file"
+            if [ "$ASSETS" -gt 0 ]; then
+              echo "✅ APK tersedia di Release"
+            else
+              echo "⚠️  Belum ada APK di release"
+            fi
+          fi
+
+      - name: 🧾 Summary
+        run: |
+          echo ""
+          echo "==============================="
+          echo "  HASIL VALIDASI"
+          echo "==============================="
+          echo "  Repo   : ${{ github.repository }}"
+          echo "  Branch : ${{ github.ref_name }}"
+          echo "  Commit : ${{ github.sha }}"
+          echo "  Status : ✅ LULUS"
+          echo "==============================="
