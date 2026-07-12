@@ -1,0 +1,107 @@
+name: 🚀 Release Il2CppDumper
+
+on:
+  push:
+    tags:
+      - 'il2cpp-v*'
+  workflow_dispatch:
+    inputs:
+      version:
+        description: 'Version (contoh: 6.1.0)'
+        required: true
+        default: '6.1.0'
+      prerelease:
+        description: 'Pre-release?'
+        required: false
+        default: 'false'
+        type: boolean
+
+jobs:
+  release:
+    name: 📦 Create Release & Upload APK
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: ⬇️ Checkout repo
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: 🏷️ Set version
+        id: version
+        run: |
+          if [ "${{ github.event_name }}" = "workflow_dispatch" ]; then
+            echo "VERSION=${{ github.event.inputs.version }}" >> $GITHUB_OUTPUT
+            echo "TAG=il2cpp-v${{ github.event.inputs.version }}" >> $GITHUB_OUTPUT
+          else
+            TAG="${GITHUB_REF#refs/tags/}"
+            VERSION="${TAG#il2cpp-v}"
+            echo "VERSION=$VERSION" >> $GITHUB_OUTPUT
+            echo "TAG=$TAG" >> $GITHUB_OUTPUT
+          fi
+
+      - name: 🔍 Cek APK di releases
+        run: |
+          echo "=== INFO BUILD ==="
+          echo "Version  : ${{ steps.version.outputs.VERSION }}"
+          echo "Tag      : ${{ steps.version.outputs.TAG }}"
+          echo "Triggered: ${{ github.event_name }}"
+          echo "Runner OS: $(uname -a)"
+
+      - name: 📋 Validate folder structure
+        run: |
+          echo "=== CEK STRUKTUR FOLDER ==="
+          find il2cppDumper/ -type f | sort
+          echo "✅ Struktur folder OK"
+
+      - name: 🏷️ Create Git Tag (manual trigger only)
+        if: github.event_name == 'workflow_dispatch'
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          git tag "${{ steps.version.outputs.TAG }}" || echo "Tag already exists"
+          git push origin "${{ steps.version.outputs.TAG }}" || echo "Tag push skipped"
+
+      - name: 📝 Generate Release Notes
+        id: notes
+        run: |
+          cat >> release_notes.md << 'NOTES'
+          ## 📦 Il2CppDumper v${{ steps.version.outputs.VERSION }}
+
+          ### 🆕 Perubahan
+          - Release otomatis via GitHub Actions
+          - Build date: $(date -u '+%Y-%m-%d %H:%M UTC')
+
+          ### 📥 Cara Download & Install
+          1. Download `Il2cppDumper_${{ steps.version.outputs.VERSION }}.apk` di bawah
+          2. Enable **Unknown Sources** di Android Settings
+          3. Install APK
+          4. Baca [SETUP.md](https://github.com/${{ github.repository }}/blob/main/il2cppDumper/SETUP.md) untuk panduan lengkap
+
+          ### ⚙️ Persyaratan
+          - Android 7.0+ (API 24)
+          - Storage: min 500MB
+          - Arsitektur: arm64-v8a / armeabi-v7a
+
+          ### ⚠️ Catatan
+          > APK tersedia sebagai Release Asset di bawah
+          NOTES
+          echo "✅ Release notes dibuat"
+
+      - name: 🚀 Create GitHub Release
+        id: create_release
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ${{ steps.version.outputs.TAG }}
+          name: "🛠️ Il2CppDumper v${{ steps.version.outputs.VERSION }}"
+          body_path: release_notes.md
+          draft: false
+          prerelease: ${{ github.event.inputs.prerelease == 'true' }}
+          token: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: ✅ Done
+        run: |
+          echo "==========================="
+          echo "✅ RELEASE BERHASIL DIBUAT"
+          echo "URL: ${{ steps.create_release.outputs.url }}"
+          echo "==========================="
