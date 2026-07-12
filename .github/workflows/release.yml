@@ -18,7 +18,7 @@ on:
 
 jobs:
   release:
-    name: 📦 Create Release & Upload APK
+    name: 📦 Create/Update Release
     runs-on: ubuntu-latest
 
     steps:
@@ -40,7 +40,7 @@ jobs:
             echo "TAG=$TAG" >> $GITHUB_OUTPUT
           fi
 
-      - name: 🔍 Cek APK di releases
+      - name: 🔍 Info build
         run: |
           echo "=== INFO BUILD ==="
           echo "Version  : ${{ steps.version.outputs.VERSION }}"
@@ -59,21 +59,21 @@ jobs:
         run: |
           git config user.name "github-actions[bot]"
           git config user.email "github-actions[bot]@users.noreply.github.com"
-          git tag "${{ steps.version.outputs.TAG }}" || echo "Tag already exists"
-          git push origin "${{ steps.version.outputs.TAG }}" || echo "Tag push skipped"
+          git tag "${{ steps.version.outputs.TAG }}" 2>/dev/null || echo "Tag sudah ada, lanjut..."
+          git push origin "${{ steps.version.outputs.TAG }}" 2>/dev/null || echo "Tag push dilewati"
 
       - name: 📝 Generate Release Notes
-        id: notes
         run: |
-          cat >> release_notes.md << 'NOTES'
+          BUILD_DATE=$(date -u '+%Y-%m-%d %H:%M UTC')
+          cat > release_notes.md << NOTES
           ## 📦 Il2CppDumper v${{ steps.version.outputs.VERSION }}
 
-          ### 🆕 Perubahan
-          - Release otomatis via GitHub Actions
-          - Build date: $(date -u '+%Y-%m-%d %H:%M UTC')
+          ### 🆕 Info Build
+          - Build date: ${BUILD_DATE}
+          - Triggered by: ${{ github.event_name }}
 
           ### 📥 Cara Download & Install
-          1. Download `Il2cppDumper_${{ steps.version.outputs.VERSION }}.apk` di bawah
+          1. Download \`Il2cppDumper_${{ steps.version.outputs.VERSION }}.apk\` di bawah
           2. Enable **Unknown Sources** di Android Settings
           3. Install APK
           4. Baca [SETUP.md](https://github.com/${{ github.repository }}/blob/main/il2cppDumper/SETUP.md) untuk panduan lengkap
@@ -82,14 +82,28 @@ jobs:
           - Android 7.0+ (API 24)
           - Storage: min 500MB
           - Arsitektur: arm64-v8a / armeabi-v7a
-
-          ### ⚠️ Catatan
-          > APK tersedia sebagai Release Asset di bawah
           NOTES
           echo "✅ Release notes dibuat"
+          cat release_notes.md
 
-      - name: 🚀 Create GitHub Release
-        id: create_release
+      - name: 🔎 Cek release sudah ada atau belum
+        id: check_release
+        run: |
+          RESPONSE=$(curl -s \
+            -H "Authorization: Bearer ${{ secrets.GITHUB_TOKEN }}" \
+            "https://api.github.com/repos/${{ github.repository }}/releases/tags/${{ steps.version.outputs.TAG }}")
+          RELEASE_ID=$(echo "$RESPONSE" | grep -o '"id":[0-9]*' | head -1 | grep -o '[0-9]*')
+          if [ -n "$RELEASE_ID" ]; then
+            echo "RELEASE_EXISTS=true" >> $GITHUB_OUTPUT
+            echo "RELEASE_ID=$RELEASE_ID" >> $GITHUB_OUTPUT
+            echo "ℹ️  Release sudah ada (ID: $RELEASE_ID) — akan update"
+          else
+            echo "RELEASE_EXISTS=false" >> $GITHUB_OUTPUT
+            echo "ℹ️  Release belum ada — akan buat baru"
+          fi
+
+      - name: 🆕 Buat Release baru (jika belum ada)
+        if: steps.check_release.outputs.RELEASE_EXISTS == 'false'
         uses: softprops/action-gh-release@v2
         with:
           tag_name: ${{ steps.version.outputs.TAG }}
@@ -99,9 +113,20 @@ jobs:
           prerelease: ${{ github.event.inputs.prerelease == 'true' }}
           token: ${{ secrets.GITHUB_TOKEN }}
 
+      - name: 📝 Update Release yang sudah ada
+        if: steps.check_release.outputs.RELEASE_EXISTS == 'true'
+        run: |
+          BODY=$(cat release_notes.md | jq -Rs .)
+          curl -s -X PATCH \
+            -H "Authorization: Bearer ${{ secrets.GITHUB_TOKEN }}" \
+            -H "Accept: application/vnd.github+json" \
+            "https://api.github.com/repos/${{ github.repository }}/releases/${{ steps.check_release.outputs.RELEASE_ID }}" \
+            -d "{\"body\":$BODY}" | grep -o '"id":[0-9]*' | head -1
+          echo "✅ Release berhasil diupdate"
+
       - name: ✅ Done
         run: |
           echo "==========================="
-          echo "✅ RELEASE BERHASIL DIBUAT"
-          echo "URL: ${{ steps.create_release.outputs.url }}"
+          echo "✅ RELEASE SELESAI"
+          echo "URL: https://github.com/${{ github.repository }}/releases/tag/${{ steps.version.outputs.TAG }}"
           echo "==========================="
