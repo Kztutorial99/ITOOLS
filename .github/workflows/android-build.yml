@@ -1,0 +1,273 @@
+name: 🤖 Build Il2CppDumper APK (Android)
+
+on:
+  workflow_dispatch:
+    inputs:
+      version:
+        description: 'Version tag (contoh: 6.1.0)'
+        required: true
+        default: '6.1.0'
+      upload_release:
+        description: 'Upload ke GitHub Release?'
+        required: false
+        default: 'true'
+        type: boolean
+
+jobs:
+  build-android:
+    name: 🏗️ Build APK dari Source
+    runs-on: ubuntu-latest
+    timeout-minutes: 90
+
+    steps:
+      # ─── 1. Checkout ITOOLS repo ───────────────────────────────────────
+      - name: ⬇️ Checkout ITOOLS
+        uses: actions/checkout@v4
+
+      # ─── 2. Clone source rodroid-il2cppdumper ─────────────────────────
+      - name: 📥 Clone source rodroid-il2cppdumper
+        run: |
+          git clone --depth 1 https://github.com/rodroidmods/rodroid-il2cppdumper source/
+          echo "=== Source version ===" 
+          cat source/package.json | python3 -c "import sys,json; d=json.load(sys.stdin); print(d['version'])"
+
+      # ─── 3. Setup JDK 17 ───────────────────────────────────────────────
+      - name: ☕ Setup JDK 17
+        uses: actions/setup-java@v4
+        with:
+          java-version: '17'
+          distribution: 'temurin'
+
+      # ─── 4. Setup Android SDK + NDK ───────────────────────────────────
+      - name: 🤖 Setup Android SDK
+        uses: android-actions/setup-android@v3
+        with:
+          cmdline-tools-version: 11076708
+          accept-android-sdk-licenses: true
+
+      - name: 🔧 Install NDK & Build Tools
+        run: |
+          sdkmanager --install \
+            "ndk;27.2.12479018" \
+            "build-tools;34.0.0" \
+            "platforms;android-34" \
+            --sdk_root="$ANDROID_SDK_ROOT" 2>/dev/null
+          echo "ANDROID_NDK_HOME=$ANDROID_SDK_ROOT/ndk/27.2.12479018" >> $GITHUB_ENV
+          echo "NDK_HOME=$ANDROID_SDK_ROOT/ndk/27.2.12479018" >> $GITHUB_ENV
+          echo "✅ NDK: $ANDROID_SDK_ROOT/ndk/27.2.12479018"
+
+      # ─── 5. Setup Node.js ──────────────────────────────────────────────
+      - name: 🟢 Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+          cache: 'npm'
+          cache-dependency-path: source/package-lock.json
+
+      # ─── 6. Setup Rust + Android targets ──────────────────────────────
+      - name: 🦀 Setup Rust stable
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          toolchain: stable
+          targets: aarch64-linux-android,armv7-linux-androideabi,i686-linux-android,x86_64-linux-android
+
+      - name: 💾 Cache Rust
+        uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: source/src-tauri -> target
+          cache-on-failure: true
+
+      # ─── 7. Install frontend deps ──────────────────────────────────────
+      - name: 📦 Install frontend dependencies
+        working-directory: source
+        run: npm ci
+
+      # ─── 8. Tauri Android init ─────────────────────────────────────────
+      - name: 🔨 Tauri Android init
+        working-directory: source
+        env:
+          ANDROID_HOME: ${{ env.ANDROID_SDK_ROOT }}
+          NDK_HOME: ${{ env.ANDROID_NDK_HOME }}
+        run: |
+          npx tauri android init
+          echo "=== gen/android structure ===" 
+          find src-tauri/gen/android -maxdepth 2 -type f | sort | head -30
+
+      # ─── 9. Setup signing keystore ─────────────────────────────────────
+      - name: 🔑 Setup signing keystore
+        working-directory: source
+        run: |
+          # Decode keystore dari secret
+          echo "${{ secrets.ANDROID_KEYSTORE_BASE64 }}" | base64 -d > src-tauri/gen/android/keystore.p12
+          ls -lh src-tauri/gen/android/keystore.p12
+
+          # Tulis key.properties untuk Gradle
+          cat > src-tauri/gen/android/key.properties << EOF
+          storePassword=${{ secrets.KEY_STORE_PASSWORD }}
+          keyPassword=${{ secrets.KEY_PASSWORD }}
+          keyAlias=${{ secrets.KEY_ALIAS }}
+          storeFile=keystore.p12
+          EOF
+          echo "✅ key.properties ditulis"
+
+      # ─── 10. Inject signing ke build.gradle ────────────────────────────
+      - name: ⚙️ Inject signing config ke build.gradle
+        working-directory: source
+        run: |
+          GRADLE=$(find src-tauri/gen/android -name "build.gradle.kts" | head -1)
+          echo "Patching: $GRADLE"
+
+          if [ -z "$GRADLE" ]; then
+            GRADLE=$(find src-tauri/gen/android -name "build.gradle" | head -1)
+          fi
+
+          if [ -n "$GRADLE" ]; then
+            # Backup
+            cp "$GRADLE" "${GRADLE}.bak"
+
+            python3 << 'PYEOF'
+          import re, os
+
+          gradle_path = None
+          for root, dirs, files in os.walk("src-tauri/gen/android"):
+              for f in files:
+                  if f in ("build.gradle.kts", "build.gradle"):
+                      gradle_path = os.path.join(root, f)
+                      break
+              if gradle_path:
+                  break
+
+          if not gradle_path:
+              print("build.gradle not found!")
+              exit(1)
+
+          print(f"Patching: {gradle_path}")
+
+          with open(gradle_path, "r") as f:
+              content = f.read()
+
+          signing_block = """
+          val keystoreProperties = java.util.Properties()
+          val keystoreFile = rootProject.file("keystore.p12")
+          if (keystoreFile.exists()) {
+              keystoreProperties.load(java.io.FileInputStream(rootProject.file("key.properties")))
+          }
+
+          """
+
+          if "signingConfigs" not in content:
+              android_block = re.search(r'(android\s*\{)', content)
+              if android_block:
+                  insert_pos = android_block.end()
+                  signing_config = """
+              signingConfigs {
+                  create("release") {
+                      storeFile = file("keystore.p12")
+                      storePassword = keystoreProperties["storePassword"] as String? ?: ""
+                      keyAlias = keystoreProperties["keyAlias"] as String? ?: ""
+                      keyPassword = keystoreProperties["keyPassword"] as String? ?: ""
+                  }
+              }
+              buildTypes {
+                  getByName("release") {
+                      signingConfig = signingConfigs.getByName("release")
+                  }
+              }
+          """
+                  content = content[:insert_pos] + signing_config + content[insert_pos:]
+                  print("✅ Signing config injected")
+              else:
+                  print("⚠️  android block not found, skip patch")
+          else:
+              print("ℹ️  signingConfigs already present, skip patch")
+
+          with open(gradle_path, "w") as f:
+              f.write(content)
+          PYEOF
+          else
+            echo "⚠️  build.gradle not found, signing di-skip (debug APK)"
+          fi
+
+      # ─── 11. Build APK ────────────────────────────────────────────────
+      - name: 🏗️ Build Android APK (arm64 + x86_64)
+        working-directory: source
+        env:
+          ANDROID_HOME: ${{ env.ANDROID_SDK_ROOT }}
+          NDK_HOME: ${{ env.ANDROID_NDK_HOME }}
+        run: |
+          echo "=== BUILD INFO ===" 
+          echo "NDK: $NDK_HOME"
+          echo "SDK: $ANDROID_HOME"
+          echo "Rust targets: aarch64-linux-android x86_64-linux-android"
+
+          # Build APK release (arm64 + x86_64)
+          npx tauri android build \
+            --apk \
+            --target aarch64 \
+            --target x86_64 \
+            -- --release 2>&1 || \
+          npx tauri android build --apk 2>&1
+
+      # ─── 12. Cari & rename APK ────────────────────────────────────────
+      - name: 📋 Cari APK hasil build
+        working-directory: source
+        run: |
+          echo "=== CARI APK ===" 
+          find . -name "*.apk" -not -path "*/\.*" | sort
+
+          # Copy ke workspace root
+          APK=$(find . -name "*.apk" -not -path "*/\.*" | head -1)
+          if [ -n "$APK" ]; then
+            VERSION="${{ github.event.inputs.version }}"
+            cp "$APK" "../Il2cppDumper_${VERSION}_built.apk"
+            ls -lh "../Il2cppDumper_${VERSION}_built.apk"
+            echo "✅ APK ditemukan: $APK"
+            echo "APK_PATH=Il2cppDumper_${VERSION}_built.apk" >> $GITHUB_ENV
+            echo "APK_FOUND=true" >> $GITHUB_ENV
+          else
+            echo "❌ APK tidak ditemukan!"
+            echo "APK_FOUND=false" >> $GITHUB_ENV
+          fi
+
+      # ─── 13. Upload sebagai Artifact (selalu) ─────────────────────────
+      - name: 📤 Upload APK sebagai Action Artifact
+        if: env.APK_FOUND == 'true'
+        uses: actions/upload-artifact@v4
+        with:
+          name: Il2cppDumper-v${{ github.event.inputs.version }}-Android
+          path: Il2cppDumper_${{ github.event.inputs.version }}_built.apk
+          retention-days: 30
+
+      # ─── 14. Upload ke GitHub Release ────────────────────────────────
+      - name: 🚀 Upload ke GitHub Release
+        if: env.APK_FOUND == 'true' && github.event.inputs.upload_release == 'true'
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          VERSION="${{ github.event.inputs.version }}"
+          TAG="il2cpp-v${VERSION}"
+
+          # Cek release ada
+          if gh release view "$TAG" --repo ${{ github.repository }} > /dev/null 2>&1; then
+            echo "📦 Upload APK ke release $TAG"
+            gh release upload "$TAG" \
+              "Il2cppDumper_${VERSION}_built.apk" \
+              --repo ${{ github.repository }} \
+              --clobber
+            echo "✅ APK berhasil diupload ke release $TAG"
+          else
+            echo "⚠️  Release $TAG tidak ada — APK tersedia di Action Artifacts"
+          fi
+
+      # ─── 15. Summary ─────────────────────────────────────────────────
+      - name: 📊 Build Summary
+        if: always()
+        run: |
+          echo "========================================"
+          echo "  BUILD SUMMARY"
+          echo "========================================"
+          echo "  Version  : ${{ github.event.inputs.version }}"
+          echo "  APK found: ${{ env.APK_FOUND }}"
+          echo "  Upload   : ${{ github.event.inputs.upload_release }}"
+          echo "  Repo     : ${{ github.repository }}"
+          echo "========================================"
